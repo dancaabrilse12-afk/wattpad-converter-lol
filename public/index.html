@@ -1,9 +1,138 @@
 <!DOCTYPE html>
-<html>
+<html lang="es">
 <head>
-  <title>API funcionando</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WattFetch • Generador de Historias</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #0f172a; color: white; font-family: ui-sans-serif, system-ui, sans-serif; }
+        .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.1); }
+        .btn-gradient { background: linear-gradient(90deg, #8b5cf6, #d946ef); transition: all 0.3s; }
+        .btn-gradient:hover:not(:disabled) { transform: scale(1.02); box-shadow: 0 0 20px rgba(139, 92, 246, 0.4); }
+        .loader { border-top-color: #8b5cf6; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
 </head>
-<body>
-  <h1>Servidor activo 🚀</h1>
+<body class="min-h-screen flex flex-col items-center justify-center p-6">
+
+    <div class="mb-10 text-center">
+        <div class="glass px-4 py-2 rounded-full inline-flex items-center mb-6">
+            <span class="text-xs font-bold uppercase tracking-widest mr-2 text-gray-400">Servidor:</span>
+            <div id="status-pill" class="flex items-center text-xs font-bold text-red-400">
+                <span id="status-dot" class="w-2 h-2 rounded-full bg-red-500 mr-2"></span>
+                <span id="status-text">Verificando...</span>
+            </div>
+        </div>
+        
+        <h1 class="text-5xl font-extrabold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-500">
+            WattFetch
+        </h1>
+        <p class="text-gray-400 max-w-sm mx-auto text-sm italic">Convierte historias de Wattpad a TXT en segundos.</p>
+    </div>
+
+    <div class="glass w-full max-w-md rounded-3xl p-8 shadow-2xl">
+        <label class="block text-xs font-bold text-gray-500 uppercase mb-3 tracking-widest">URL de la historia</label>
+        <input type="text" id="story-url" placeholder="https://www.wattpad.com/story/..." 
+               class="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-4 text-white mb-6 focus:ring-2 focus:ring-purple-500 outline-none transition-all">
+        
+        <button id="action-btn" onclick="handleProcess()" disabled 
+                class="btn-gradient w-full py-4 rounded-xl font-bold text-lg opacity-50 cursor-not-allowed flex justify-center items-center">
+            <span id="btn-text">Esperando servidor...</span>
+        </button>
+
+        <div id="info-display" class="mt-6 text-center text-sm hidden">
+            <div class="h-px bg-slate-700 w-full mb-4"></div>
+            <p id="story-name" class="font-bold text-purple-400 text-lg"></p>
+            <p id="story-details" class="text-gray-500 text-xs mt-1"></p>
+        </div>
+    </div>
+
+    <script>
+        const btn = document.getElementById('action-btn');
+        const btnText = document.getElementById('btn-text');
+        const statusText = document.getElementById('status-text');
+        const statusDot = document.getElementById('status-dot');
+        const infoDisplay = document.getElementById('info-display');
+
+        // Verificar si el backend está activo
+        async function checkApi() {
+            try {
+                const res = await fetch('/api/health');
+                if (res.ok) {
+                    statusText.innerText = 'Online';
+                    statusText.classList.replace('text-red-400', 'text-green-400');
+                    statusDot.classList.replace('bg-red-500', 'bg-green-500');
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                    btnText.innerText = 'Cargar Historia';
+                }
+            } catch (e) {
+                console.log("Servidor conectando...");
+            }
+        }
+
+        async function handleProcess() {
+            const url = document.getElementById('story-url').value;
+            if (!url.includes('wattpad.com')) return alert("Pega un enlace válido de Wattpad");
+
+            // Si ya cargó la info, la segunda vez descarga
+            if (btnText.innerText === 'Descargar TXT') {
+                return downloadFile(url);
+            }
+
+            btn.disabled = true;
+            btnText.innerHTML = '<div class="loader w-5 h-5 border-2 border-white rounded-full mr-2"></div> Analizando...';
+
+            try {
+                const res = await fetch(`/api/info?url=${encodeURIComponent(url)}`);
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+
+                infoDisplay.classList.remove('hidden');
+                document.getElementById('story-name').innerText = data.title;
+                document.getElementById('story-details').innerText = `${data.author} • ${data.chapters.length} capítulos encontrados`;
+
+                btnText.innerText = "Descargar TXT";
+                btn.disabled = false;
+            } catch (err) {
+                alert(err.message);
+                btn.disabled = false;
+                btnText.innerText = "Reintentar";
+            }
+        }
+
+        async function downloadFile(url) {
+            btn.disabled = true;
+            btnText.innerHTML = '<div class="loader w-5 h-5 border-2 border-white rounded-full mr-2"></div> Convirtiendo...';
+
+            try {
+                const res = await fetch('/api/convert', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url })
+                });
+
+                const blob = await res.blob();
+                const dlUrl = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = dlUrl;
+                a.download = "Historia_Wattpad.txt";
+                a.click();
+
+                btnText.innerText = "¡Listo!";
+                setTimeout(() => {
+                    btnText.innerText = "Descargar de nuevo";
+                    btn.disabled = false;
+                }, 3000);
+            } catch (e) {
+                alert("Fallo en la descarga");
+                btn.disabled = false;
+            }
+        }
+
+        setInterval(checkApi, 5000);
+        checkApi();
+    </script>
 </body>
 </html>
