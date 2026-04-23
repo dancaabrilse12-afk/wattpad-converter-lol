@@ -1,18 +1,22 @@
 {
-  "name": "wattpad-pro-downloader",
-  "version": "2.0.0",
+  "name": "wattpad-converter-lol",
+  "version": "2.1.0",
+  "description": "Descargador de historias de Wattpad como PDF, EPUB, DOCX y TXT",
   "main": "server.js",
-  "dependencies": {
-    "axios": "^1.6.2",
-    "cheerio": "^1.0.0-rc.12",
-    "express": "^4.18.2",
-    "compression": "^1.7.4",
-    "html-to-text": "^9.0.5",
-    "canvas": "^2.11.2",
-    "jsdom": "^22.1.0",
-    "uuid": "^9.0.1"
-  },
   "scripts": {
     "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "axios":         "^1.6.8",
+    "cheerio":       "^1.0.0",
+    "cors":          "^2.8.5",
+    "docx":          "^8.5.0",
+    "express":       "^4.18.2",
+    "html-to-text":  "^9.0.5",
+    "jszip":         "^3.10.1",
+    "pdfkit":        "^0.14.0"
   }
 }
