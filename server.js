@@ -1,89 +1,105 @@
 const express = require("express");
-const cors = require("cors");
 const compression = require("compression");
-const { v4: uuidv4 } = require("uuid");
 const scraper = require("./src/scraper");
 
-// Conversores (Asumiendo que exportan funciones que reciben la historia y devuelven Buffer)
-const converters = {
-  pdf: require("./src/converters/toPdf"),
-  epub: require("./src/converters/toEpub"),
-  docx: require("./src/converters/toDocx"),
-  txt: require("./src/converters/toTxt")
-};
-
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// Configuración de Seguridad y Rendimiento
-app.use(compression()); // Reduce el tamaño de las respuestas JSON/Texto
-app.use(cors());
-app.use(express.json({ limit: "5mb" }));
+// Middlewares Pro
+app.use(compression()); // Gzip para ahorrar ancho de banda
+app.use(express.json({ limit: "10mb" }));
 app.use(express.static("public"));
 
-/**
- * Manejador central de conversiones
- */
-app.post("/api/convert", async (req, res) => {
-  const { url, format, chapters: selectedChapters } = req.body;
-  const requestId = uuidv4().slice(0, 8);
+// Configuración de Límites (Render Free Tier Safe)
+const MAX_CONCURRENT_JOBS = 2;
+let currentJobs = 0;
 
-  if (!url || !format) {
-    return res.status(400).json({ error: "Faltan parámetros: url y format son obligatorios." });
-  }
-
-  console.log(`[${requestId}] Iniciando conversión para: ${url} [${format}]`);
+// --- ENDPOINT: OBTENER INFO ---
+app.get("/api/info", async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).json({ error: "URL requerida" });
 
   try {
-    // 1. Obtener datos de Wattpad
-    const story = await scraper.getFullStory(url, { chapterIndices: selectedChapters });
-    
-    // 2. Seleccionar conversor
-    const converter = converters[format.toLowerCase()];
-    if (!converter) throw new Error("Formato no soportado");
-
-    // 3. Generar archivo
-    const buffer = await converter(story);
-
-    // 4. Configurar cabeceras de descarga
-    const fileName = `${story.title.replace(/[^a-z0-9]/gi, "_")}.${format}`;
-    
-    res.setHeader("Content-Type", getMimeType(format));
-    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(fileName)}"`);
-    res.setHeader("Content-Length", buffer.length);
-
-    // Enviar y limpiar
-    res.send(buffer);
-    
-    console.log(`[${requestId}] Completado exitosamente.`);
-    
-    // Sugerir al recolector de basura (GC) que limpie el buffer
-    // Importante en Render Free Tier
-    setImmediate(() => { 
-      story.chapters = null; 
-    });
-
+    const data = await scraper.getStoryMetadata(url);
+    res.json(data);
   } catch (err) {
-    console.error(`[${requestId}] Error:`, err.message);
-    const status = err instanceof scraper.WattpadError ? err.status : 500;
-    res.status(status).json({ 
-      error: "Error en el proceso", 
-      detail: err.message,
-      requestId 
-    });
+    res.status(502).json({ error: err.message });
   }
 });
 
-function getMimeType(fmt) {
-  const types = {
-    pdf: "application/pdf",
-    epub: "application/epub+zip",
-    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    txt: "text/plain"
-  };
-  return types[fmt] || "application/octet-stream";
-}
+// --- ENDPOINT: CONVERSIÓN ---
+app.post("/api/convert", async (req, res) => {
+  if (currentJobs >= MAX_CONCURRENT_JOBS) {
+    return res.status(503).json({ error: "Servidor saturado. Intenta en 1 minuto." });
+  }
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Servidor listo en puerto ${PORT}`);
+  const { url, format, chapters: indices } = req.body;
+  if (!url || !format) return res.status(400).json({ error: "Faltan datos" });
+
+  currentJobs++;
+  console.log(`[JOB START] Unidades activas: ${currentJobs}`);
+
+  try {
+    // 1. Obtener Metadatos
+    const metadata = await scraper.getStoryMetadata(url);
+    
+    // 2. Filtrar capítulos seleccionados
+    const targetChapters = indices 
+      ? metadata.chapters.filter(c => indices.includes(c.index))
+      : metadata.chapters;
+
+    // 3. Descarga Secuencial (Protege la RAM)
+    const storyContent = [];
+    for (const ch of targetChapters) {
+      console.log(`[SCRAPE] Descargando: ${ch.title}`);
+      const content = await scraper.getChapterContent(ch);
+      storyContent.push(content);
+      // Pequeño respiro para el event loop
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    const fullStory = { ...metadata, chapters: storyContent };
+
+    // 4. Lógica de Conversión (Ejemplo simplificado a TXT para el ejemplo)
+    // Aquí llamarías a tus archivos en src/converters/
+    let buffer;
+    let mime;
+    
+    if (format === "txt") {
+      const txt = fullStory.chapters.map(c => `${c.title.toUpperCase()}\n\n${c.text}`).join("\n\n---\n\n");
+      buffer = Buffer.from(txt, "utf-8");
+      mime = "text/plain";
+    } else {
+      // Aquí invocas toPdf(fullStory), etc.
+      // const buffer = await toPdf(fullStory);
+      throw new Error("Convertidor no implementado en este bloque de ejemplo");
+    }
+
+    // 5. Envío de Archivo
+    const safeName = metadata.title.replace(/[^a-z0-9]/gi, "_");
+    res.setHeader("Content-Type", mime);
+    res.setHeader("Content-Disposition", `attachment; filename="${safeName}.${format}"`);
+    res.send(buffer);
+
+  } catch (err) {
+    console.error("[JOB ERROR]", err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    currentJobs--;
+    console.log(`[JOB END] Unidades activas: ${currentJobs}`);
+    
+    // Sugerencia de limpieza de memoria
+    if (global.gc) global.gc();
+  }
 });
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`
+  ###########################################
+  🚀 SISTEMA DE DESCARGA PRO OPERATIVO
+  📍 Puerto: ${PORT}
+  📍 Modo: Render/Android Optimized
+  ###########################################
+  `);
+});
+  
