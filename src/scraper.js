@@ -1,117 +1,113 @@
 const axios = require("axios");
+const cheerio = require("cheerio");
 const { convert: htmlToText } = require("html-to-text");
+const fs = require("fs");
+const path = require("path");
 
-class WattpadError extends Error {
-  constructor(message, code, status = 502) {
-    super(message);
-    this.code = code;
-    this.status = status;
-  }
-}
-
-// Huellas digitales de navegadores reales (Desktop y Mobile)
-const AGENTS = [
-  { ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36", platform: "Windows" },
-  { ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36", platform: "macOS" },
-  { ua: "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36", platform: "Android" }
-];
-
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-/**
- * Cliente HTTP con lógica de reintentos y cabeceras dinámicas
- */
-async function apiCall(config, retries = 2) {
-  const agent = AGENTS[Math.floor(Math.random() * AGENTS.length)];
-  
-  const headers = {
-    "User-Agent": agent.ua,
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-    "Sec-Ch-Ua-Platform": `"${agent.platform}"`,
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin",
-    "Referer": "https://www.wattpad.com/",
-    ...config.headers
-  };
-
-  for (let i = 0; i <= retries; i++) {
-    try {
-      return await axios({ ...config, headers, timeout: 15000 });
-    } catch (err) {
-      const isLast = i === retries;
-      if (isLast || err.response?.status === 404) throw err;
-      // Espera exponencial antes de reintentar
-      await sleep(1000 * (i + 1));
-    }
-  }
-}
-
-const getStoryInfo = async (url) => {
-  const id = url.match(/\/story\/(\d+)/)?.[1];
-  if (!id) throw new WattpadError("URL no válida", "INVALID_URL", 400);
-
-  try {
-    const { data } = await apiCall({
-      url: `https://www.wattpad.com/api/v3/stories/${id}`,
-      params: { fields: "id,title,cover,user(name),description,numParts" }
+class WattpadScraper {
+  constructor() {
+    this.cacheDir = path.join(__dirname, "../.cache");
+    if (!fs.existsSync(this.cacheDir)) fs.mkdirSync(this.cacheDir);
+    
+    this.client = axios.create({
+      timeout: 30000,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8"
+      }
     });
-    return data;
-  } catch (e) {
-    throw new WattpadError("Wattpad bloqueó la información base", "INFO_BLOCKED", 502);
   }
-};
 
-const getChapterContent = async (id) => {
-  const { data } = await apiCall({
-    url: "https://www.wattpad.com/apiv2/storytext",
-    params: { id }
-  });
-  const html = data.text || data.html || "";
-  return {
-    html,
-    text: htmlToText(html, { wordwrap: false, selectors: [{ selector: 'img', format: 'skip' }] })
-  };
-};
+  // --- SISTEMA DE CACHÉ PERSISTENTE ---
+  _getCache(id) {
+    const p = path.join(this.cacheDir, `${id}.json`);
+    if (fs.existsSync(p)) {
+      const { data, expire } = JSON.parse(fs.readFileSync(p, "utf-8"));
+      if (Date.now() < expire) return data;
+    }
+    return null;
+  }
 
-const getFullStory = async (url, { chapterIndices = null } = {}) => {
-  const info = await getStoryInfo(url);
-  
-  const { data: partsData } = await apiCall({
-    url: `https://www.wattpad.com/api/v3/stories/${info.id}/parts`,
-    params: { fields: "id,title" }
-  });
+  _setCache(id, data, ttlHours = 12) {
+    const p = path.join(this.cacheDir, `${id}.json`);
+    const payload = { data, expire: Date.now() + (ttlHours * 60 * 60 * 1000) };
+    fs.writeFileSync(p, JSON.stringify(payload));
+  }
 
-  const allParts = (partsData.parts || partsData.pages).map((p, i) => ({ ...p, index: i + 1 }));
-  const toFetch = chapterIndices 
-    ? allParts.filter(p => chapterIndices.includes(p.index)) 
-    : allParts;
-
-  const chapters = [];
-  
-  // PROCESAMIENTO EN SERIE: Para no saturar la RAM de Render
-  for (const part of toFetch) {
+  // --- EXTRACCIÓN DE METADATA ---
+  async getStoryMetadata(url) {
     try {
-      console.log(`[Scraper] Descargando: ${part.title}`);
-      const content = await getChapterContent(part.id);
-      chapters.push({
-        title: part.title,
-        ...content
+      const { data: html } = await this.client.get(url);
+      const $ = cheerio.load(html);
+
+      // Selectores Semánticos (Buscan etiquetas, no clases)
+      const title = $("h1").first().text().trim() || "Historia de Wattpad";
+      const author = $('a[href*="/user/"]').first().text().trim() || "Autor Desconocido";
+      const description = $('div[aria-label="Story description"]').text().trim() || $(".description-text").text().trim();
+      const cover = $('.story-cover img').attr('src') || $('meta[property="og:image"]').attr('content');
+
+      const chapters = [];
+      // Buscamos enlaces que sigan el patrón de "partes" de Wattpad
+      $('a[href*="/story/"]').each((i, el) => {
+        const href = $(el).attr("href");
+        const name = $(el).text().trim();
+        if (href && name && href.includes("-")) {
+          chapters.push({
+            index: i + 1,
+            title: name,
+            url: href.startsWith("http") ? href : `https://www.wattpad.com${href}`,
+            id: href.split("/")[2]?.split("-")[0] || Math.random().toString(36).slice(2)
+          });
+        }
       });
-      // Anti-ban: pausa aleatoria pequeña
-      await sleep(300 + Math.random() * 500);
-    } catch (e) {
-      chapters.push({ title: part.title, text: "Contenido no disponible (Bloqueo de Wattpad)", html: "" });
+
+      // Limpiar duplicados de navegación
+      const uniqueChapters = Array.from(new Map(chapters.map(c => [c.url, c])).values())
+                                  .map((c, i) => ({ ...c, index: i + 1 }));
+
+      return { title, author, description, cover, chapters: uniqueChapters };
+    } catch (err) {
+      console.error("Error en Metadatos:", err.message);
+      throw new Error("No se pudo conectar con Wattpad. Revisa la URL.");
     }
   }
 
-  return {
-    title: info.title,
-    author: info.user.name,
-    description: info.description,
-    cover: info.cover,
-    chapters
-  };
-};
+  // --- EXTRACCIÓN DE CONTENIDO DE CAPÍTULO ---
+  async getChapterContent(chapterObj) {
+    const cacheKey = `ch_${chapterObj.id}`;
+    const cached = this._getCache(cacheKey);
+    if (cached) return cached;
 
-module.exports = { getFullStory, getStoryInfo, getChapterList: async (url) => (await getStoryInfo(url)).numParts, WattpadError };
+    try {
+      const { data: html } = await this.client.get(chapterObj.url);
+      const $ = cheerio.load(html);
+      
+      let bodyHtml = "";
+      // Wattpad usa párrafos con IDs de datos o dentro de artículos
+      const selectors = ["p[data-p-id]", "article p", ".story-panel p", "pre"];
+      
+      for (const selector of selectors) {
+        if ($(selector).length > 0) {
+          $(selector).each((_, el) => {
+            bodyHtml += `<p>${$(el).html()}</p>`;
+          });
+          break;
+        }
+      }
+
+      const result = {
+        title: chapterObj.title,
+        html: bodyHtml,
+        text: htmlToText(bodyHtml, { wordwrap: false })
+      };
+
+      this._setCache(cacheKey, result);
+      return result;
+    } catch (err) {
+      return { title: chapterObj.title, text: "[Error cargando contenido]", html: "" };
+    }
+  }
+}
+
+module.exports = new WattpadScraper();
+      
