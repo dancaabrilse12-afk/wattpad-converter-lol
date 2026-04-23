@@ -1,8 +1,18 @@
 ```javascript
 const express = require("express");
 const compression = require("compression");
-const scraper = require("./src/scraper");
 const path = require("path");
+const fs = require("fs");
+
+// Verificación de seguridad para evitar "Status 1" por archivo faltante
+let scraper;
+try {
+  // Intentamos cargar el scraper. Asegúrate de que la ruta sea src/scraper.js
+  scraper = require("./src/scraper");
+} catch (err) {
+  console.error("❌ ERROR CRÍTICO AL CARGAR EL SCRAPER:", err.message);
+  // No detenemos el proceso aquí para que el servidor pueda al menos arrancar y reportar el error
+}
 
 const app = express();
 
@@ -10,8 +20,9 @@ const app = express();
 app.use(compression());
 app.use(express.json({ limit: "20mb" }));
 
-// --- INTERFAZ WEB INTEGRADA (Para evitar el error de Server no disponible) ---
+// --- INTERFAZ WEB INTEGRADA ---
 app.get("/", (req, res) => {
+  const scraperStatus = scraper ? "✅ Cargado" : "❌ Error de Carga";
   res.send(`
     <!DOCTYPE html>
     <html lang="es">
@@ -21,17 +32,23 @@ app.get("/", (req, res) => {
         <title>Wattpad Converter Pro</title>
         <style>
             body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background-color: #f4f4f9; color: #333; }
-            .card { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 90%; }
+            .card { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; max-width: 450px; width: 90%; }
             h1 { color: #ff6600; margin-bottom: 0.5rem; }
             p { margin-bottom: 1.5rem; line-height: 1.4; }
-            .status { display: inline-block; padding: 0.5rem 1rem; background: #e2f9e1; color: #1e4620; border-radius: 20px; font-weight: bold; font-size: 0.9rem; }
+            .status-box { text-align: left; background: #eee; padding: 10px; border-radius: 8px; font-family: monospace; font-size: 0.8rem; }
+            .status-tag { display: inline-block; padding: 0.5rem 1rem; background: #e2f9e1; color: #1e4620; border-radius: 20px; font-weight: bold; font-size: 0.9rem; margin-top: 10px; }
         </style>
     </head>
     <body>
         <div class="card">
             <h1>Wattpad Pro</h1>
-            <p>El servidor está <b>activo</b> y listo para procesar tus historias de Wattpad.</p>
-            <div class="status">● Sistema en Línea</div>
+            <p>Estado del sistema:</p>
+            <div class="status-box">
+                <div>Servidor: Online</div>
+                <div>Scraper: ${scraperStatus}</div>
+                <div>Nodo: ${process.version}</div>
+            </div>
+            <div class="status-tag">● Sistema Activo</div>
         </div>
     </body>
     </html>
@@ -41,6 +58,7 @@ app.get("/", (req, res) => {
 // --- RUTA DE INFORMACIÓN ---
 app.get("/api/info", async (req, res) => {
   const { url } = req.query;
+  if (!scraper) return res.status(500).json({ error: "El módulo scraper no se cargó correctamente en el servidor." });
   if (!url) return res.status(400).json({ error: "Falta la URL de la historia" });
 
   try {
@@ -54,6 +72,7 @@ app.get("/api/info", async (req, res) => {
 // --- RUTA DE CONVERSIÓN ---
 app.post("/api/convert", async (req, res) => {
   const { url, format, chapters } = req.body;
+  if (!scraper) return res.status(500).json({ error: "El módulo scraper no está disponible." });
   if (!url || !format) return res.status(400).json({ error: "URL y formato requeridos" });
 
   try {
@@ -64,7 +83,7 @@ app.post("/api/convert", async (req, res) => {
       const content = story.chapters.map(c => `${c.title.toUpperCase()}\n\n${c.text}`).join("\n\n---\n\n");
       buffer = Buffer.from(content, "utf-8");
     } else {
-      return res.status(400).json({ error: "Formato no soportado aún en esta ruta" });
+      return res.status(400).json({ error: "Formato no soportado aún." });
     }
 
     const safeTitle = story.title.replace(/[^a-z0-9]/gi, "_");
@@ -77,16 +96,16 @@ app.post("/api/convert", async (req, res) => {
   }
 });
 
-// --- MANEJO DE PUERTOS (CRÍTICO PARA RENDER) ---
-// Render inyecta el puerto automáticamente. Usamos 10000 como fallback.
+// --- MANEJO DE PUERTOS PARA RENDER ---
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log("###########################################");
-  console.log("🚀 SISTEMA DE DESCARGA PRO OPERATIVO");
+  console.log("🚀 SERVIDOR INICIADO EXITOSAMENTE");
   console.log(`📍 Puerto: ${PORT}`);
-  console.log("📍 Modo: Render/Android Optimized");
+  console.log(`📍 Scraper: ${scraper ? "OK" : "ERROR"}`);
   console.log("###########################################");
 });
 
 ```
+                         
