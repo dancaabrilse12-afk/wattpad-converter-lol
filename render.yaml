@@ -2,7 +2,7 @@ services:
   - type: web
     name: wattpad-converter-api
     env: node
-    region: oregon
+    region: oregon # Oregon suele ser más estable para la salida hacia servidores de Wattpad
     plan: free
     buildCommand: npm install
     startCommand: node server.js
@@ -11,5 +11,10 @@ services:
         value: production
       - key: PORT
         value: 3000
-    healthCheckPath: /
+      - key: NODE_VERSION
+        value: 18.x # Asegura compatibilidad con las librerías de scraping modernas
+      - key: GENERATE_SOURCEMAP
+        value: false # Ahorra memoria RAM durante la construcción
+    healthCheckPath: / # Asegúrate de que tu server.js tenga una ruta app.get('/') que responda 200 OK
     autoDeploy: true
+    
