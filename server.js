@@ -1,210 +1,89 @@
 const express = require("express");
 const cors = require("cors");
-const path = require("path");
-const rateLimit = require("express-rate-limit");
+const compression = require("compression");
 const { v4: uuidv4 } = require("uuid");
-
 const scraper = require("./src/scraper");
-const toTxt = require("./src/converters/toTxt");
-const toPdf = require("./src/converters/toPdf");
-const toEpub = require("./src/converters/toEpub");
-const toDocx = require("./src/converters/toDocx");
 
-// Seguridad global para que errores inesperados no maten el proceso
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught Exception:", err);
-});
-
-process.on("unhandledRejection", (err) => {
-  console.error("Unhandled Rejection:", err);
-});
+// Conversores (Asumiendo que exportan funciones que reciben la historia y devuelven Buffer)
+const converters = {
+  pdf: require("./src/converters/toPdf"),
+  epub: require("./src/converters/toEpub"),
+  docx: require("./src/converters/toDocx"),
+  txt: require("./src/converters/toTxt")
+};
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const HOST = "0.0.0.0";
 
-// ─── Middlewares ──────────────────────────────────────────────
-app.disable("x-powered-by");
-app.set("trust proxy", 1);
-
+// Configuración de Seguridad y Rendimiento
+app.use(compression()); // Reduce el tamaño de las respuestas JSON/Texto
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.json({ limit: "5mb" }));
+app.use(express.static("public"));
 
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 15,
-  message: { error: "Demasiadas solicitudes. Espera 15 minutos." },
-  standardHeaders: true,
-  legacyHeaders: false,
+/**
+ * Manejador central de conversiones
+ */
+app.post("/api/convert", async (req, res) => {
+  const { url, format, chapters: selectedChapters } = req.body;
+  const requestId = uuidv4().slice(0, 8);
+
+  if (!url || !format) {
+    return res.status(400).json({ error: "Faltan parámetros: url y format son obligatorios." });
+  }
+
+  console.log(`[${requestId}] Iniciando conversión para: ${url} [${format}]`);
+
+  try {
+    // 1. Obtener datos de Wattpad
+    const story = await scraper.getFullStory(url, { chapterIndices: selectedChapters });
+    
+    // 2. Seleccionar conversor
+    const converter = converters[format.toLowerCase()];
+    if (!converter) throw new Error("Formato no soportado");
+
+    // 3. Generar archivo
+    const buffer = await converter(story);
+
+    // 4. Configurar cabeceras de descarga
+    const fileName = `${story.title.replace(/[^a-z0-9]/gi, "_")}.${format}`;
+    
+    res.setHeader("Content-Type", getMimeType(format));
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(fileName)}"`);
+    res.setHeader("Content-Length", buffer.length);
+
+    // Enviar y limpiar
+    res.send(buffer);
+    
+    console.log(`[${requestId}] Completado exitosamente.`);
+    
+    // Sugerir al recolector de basura (GC) que limpie el buffer
+    // Importante en Render Free Tier
+    setImmediate(() => { 
+      story.chapters = null; 
+    });
+
+  } catch (err) {
+    console.error(`[${requestId}] Error:`, err.message);
+    const status = err instanceof scraper.WattpadError ? err.status : 500;
+    res.status(status).json({ 
+      error: "Error en el proceso", 
+      detail: err.message,
+      requestId 
+    });
+  }
 });
 
-app.use("/api/convert", limiter);
-
-const SUPPORTED_FORMATS = ["pdf", "epub", "docx", "txt"];
-
-function validateConvertRequest({ url, format }) {
-  if (!url) return "El campo 'url' es requerido.";
-  if (!url.includes("wattpad.com")) return "La URL debe ser de Wattpad.";
-  if (!format) return "El campo 'format' es requerido.";
-  if (!SUPPORTED_FORMATS.includes(String(format).toLowerCase())) {
-    return `Formato no soportado. Usa: ${SUPPORTED_FORMATS.join(", ")}`;
-  }
-  return null;
+function getMimeType(fmt) {
+  const types = {
+    pdf: "application/pdf",
+    epub: "application/epub+zip",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    txt: "text/plain"
+  };
+  return types[fmt] || "application/octet-stream";
 }
 
-// ─── Routes ───────────────────────────────────────────────────
-
-// Health check
-app.get("/health", (_req, res) => {
-  res.json({ ok: true });
-});
-
-// Frontend
-app.get("/", (_req, res) =>
-  res.sendFile(path.join(__dirname, "public", "index.html"))
-);
-
-// GET /api/info?url=…  → metadata sin capítulos
-app.get("/api/info", async (req, res) => {
-  const { url } = req.query;
-
-  if (!url) return res.status(400).json({ error: "Falta 'url'." });
-  if (!url.includes("wattpad.com")) {
-    return res.status(400).json({ error: "URL debe ser de Wattpad." });
-  }
-
-  try {
-    const info = await scraper.getStoryInfo(url);
-
-    if (info?.error) {
-      return res.status(502).json({
-        error: "No se pudo obtener la información de Wattpad.",
-        detail: info.detail || "Respuesta inválida o bloqueada.",
-      });
-    }
-
-    res.json(info);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/chapters?url=…  → lista ligera de capítulos (sin contenido)
-app.get("/api/chapters", async (req, res) => {
-  const { url } = req.query;
-
-  if (!url) return res.status(400).json({ error: "Falta 'url'." });
-  if (!url.includes("wattpad.com")) {
-    return res.status(400).json({ error: "URL debe ser de Wattpad." });
-  }
-
-  try {
-    const chapters = await scraper.getChapterList(url);
-
-    if (chapters?.error) {
-      return res.status(502).json({
-        error: "No se pudo obtener la lista de capítulos.",
-        detail: chapters.detail || "Respuesta inválida o bloqueada.",
-      });
-    }
-
-    res.json({ chapters });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// POST /api/convert
-// Body: { url, format, chapters?: number[], includeImages?: boolean }
-app.post("/api/convert", async (req, res) => {
-  const { url, format, chapters: selectedChapters, includeImages = false } = req.body;
-
-  const err = validateConvertRequest(req.body);
-  if (err) return res.status(400).json({ error: err });
-
-  const fmt = String(format).toLowerCase();
-  const rid = uuidv4().slice(0, 8);
-
-  console.log(
-    `[${rid}] ${url} → ${fmt.toUpperCase()} | caps: ${selectedChapters || "all"} | imgs: ${includeImages}`
-  );
-
-  try {
-    const story = await scraper.getFullStory(url, {
-      chapterIndices:
-        Array.isArray(selectedChapters) && selectedChapters.length
-          ? selectedChapters
-          : null,
-      includeImages,
-    });
-
-    let fileBuffer, mimeType, fileName;
-
-    const safe = String(story.title || "historia")
-      .replace(/[^a-z0-9áéíóúñ\s]/gi, "")
-      .trim()
-      .slice(0, 60) || "historia";
-
-    switch (fmt) {
-      case "txt":
-        fileBuffer = await toTxt(story);
-        mimeType = "text/plain; charset=utf-8";
-        fileName = `${safe}.txt`;
-        break;
-
-      case "pdf":
-        fileBuffer = await toPdf(story);
-        mimeType = "application/pdf";
-        fileName = `${safe}.pdf`;
-        break;
-
-      case "epub":
-        fileBuffer = await toEpub(story);
-        mimeType = "application/epub+zip";
-        fileName = `${safe}.epub`;
-        break;
-
-      case "docx":
-        fileBuffer = await toDocx(story);
-        mimeType =
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-        fileName = `${safe}.docx`;
-        break;
-
-      default:
-        return res.status(400).json({
-          error: `Formato no soportado. Usa: ${SUPPORTED_FORMATS.join(", ")}`,
-        });
-    }
-
-    console.log(
-      `[${rid}] OK → ${fileName} (${(fileBuffer.length / 1024).toFixed(1)} KB)`
-    );
-
-    res.set({
-      "Content-Type": mimeType,
-      "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
-      "Content-Length": fileBuffer.length,
-      "X-Story-Title": encodeURIComponent(story.title || ""),
-      "X-Story-Author": encodeURIComponent(story.author || ""),
-      "X-Chapter-Count": String(story.chapters?.length || 0),
-    });
-
-    res.send(fileBuffer);
-  } catch (err) {
-    console.error(`[${rid}] Error:`, err);
-    res.status(500).json({
-      error: "Error al procesar la historia.",
-      detail: err.message,
-    });
-  }
-});
-
-// 404
-app.use((_req, res) => res.status(404).json({ error: "No encontrado." }));
-
-app.listen(PORT, HOST, () => {
-  console.log(`✓ API en puerto ${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Servidor listo en puerto ${PORT}`);
 });
